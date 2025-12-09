@@ -301,7 +301,7 @@ Box.test(res^2, lag = 16, type = "Ljung")
 h <- length(y_test)
 
 fc_x <- forecast(
-  fit_x,
+  fit7c,
   xreg = x_test,
   h    = h
 )
