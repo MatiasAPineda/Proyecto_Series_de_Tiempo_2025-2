@@ -11,6 +11,7 @@ library(LSTS)
 library(MASS)
 library(purrr)
 library(car)
+library(moments)
 library(imputeTS)
 
 ## Data SINCA Estacíon Quintero 
@@ -277,12 +278,12 @@ start_day   <- as.numeric(format(min(datos$fecha, na.rm = TRUE), "%j"))
 start_ts <- c(start_year, start_day)
 
 pm25_vec <- num_data[["valor_PM25"]]
-pm25_ts <- ts(pm25_vec, frequency = 365, start = start_ts)
+pm25_ts <- ts(pm25_vec, frequency = 14, start = start_ts)
 
 X_df <- num_data %>% dplyr::select(-all_of("valor_PM25"))
-X_mat <- cbind(as.matrix(map_dfc(X_df, as.numeric)), dow_mat)
+X_mat <- as.matrix(map_dfc(X_df, as.numeric))
 
-X_ts <- ts(X_mat, frequency = 365, start = start_ts)
+X_ts <- ts(X_mat, frequency = 14, start = start_ts)
 
 ## separación 90/10
 n       <- length(pm25_ts)
@@ -300,6 +301,8 @@ X_test  <- window(X_ts, start = start(X_ts) + c(0, n_train))
 lambda <- BoxCox.lambda(y_train)
 lambda
 
+MASS::boxcox(y_train~1)
+
 ## ACF y PACF
 acf(y_train, lag.max = 600, main = "ACF PM2.5")
 pacf(y_train, lag.max = 600, main = "PACF PM2.5")
@@ -310,48 +313,142 @@ ndiffs(y_train)
 ## Periodograma
 LSTS::periodogram(y_train)
 
-# Ajuste SARIMAX
-fit_x <- auto.arima(
-  y_train,
-  xreg       = X_train,
-  seasonal   = TRUE,
-  lambda     = lambda,
-  biasadj    = TRUE
+# Ajuste SARIMAX 
+bruteforce_sarimax <- function(
+    y_train, X_train, order, seasonal=NULL, lambda=NULL, verbose=FALSE
+) {
+  
+  # Convertir X a matriz
+  X <- as.matrix(X_train)
+  p <- ncol(X)
+  
+  # Todas las combinaciones posibles: 0..255
+  combos <- lapply(0:(2^p - 1), function(mask){
+    which(as.logical(intToBits(mask)[1:p]))
+  })
+  
+  results <- vector("list", length(combos))
+  n_models <- length(combos)
+  
+  for(i in seq_along(combos)){
+    idx <- combos[[i]]
+    xreg <- if(length(idx) == 0) NULL else X[, idx, drop = FALSE]
+    
+    reg_names <- if(length(idx)==0) {
+      "ninguno"
+    } else {
+      paste0(colnames(X)[idx], collapse=", ")
+    }
+    
+    if (verbose) {
+      cat("\n==========================================================\n")
+      cat(sprintf("📌 Modelo %d / %d\n", i, n_models))
+      cat(sprintf("   Regresores: %s\n", reg_names))
+      cat("==========================================================\n")
+    }
+    
+    # Ajuste SARIMA/SARIMAX
+    fit <- tryCatch({
+      Arima(
+        y_train,
+        order    = order,
+        seasonal = seasonal,
+        xreg     = xreg,
+        lambda   = lambda,
+        biasadj = TRUE
+      )
+    }, error = function(e){
+      if(verbose){
+        cat("❌ Error al ajustar modelo:", e$message, "\n")
+      }
+      NULL
+    })
+    
+    if(is.null(fit)){
+      # Guardar fallo
+      results[[i]] <- list(
+        comb_id   = i,
+        k_regs    = length(idx),
+        regs      = paste(idx, collapse=","),
+        AIC       = Inf,
+        BIC       = Inf,
+        loglik    = NA,
+        converged = FALSE
+      )
+    } else {
+      # Guardar modelo OK
+      results[[i]] <- list(
+        comb_id   = i,
+        k_regs    = length(idx),
+        regs      = paste(idx, collapse=","),
+        AIC       = AIC(fit),
+        BIC       = BIC(fit),
+        loglik    = as.numeric(logLik(fit)),
+        converged = TRUE,
+        model     = fit
+      )
+      
+      # Mostrar summary
+      if(verbose){
+        cat("\n📄 Summary del modelo ajustado:\n")
+        print(summary(fit))
+      }
+    }
+  }
+  
+  # Convertir a tabla ordenada por BIC
+  df <- dplyr::bind_rows(results) %>% dplyr::arrange(BIC)
+  
+  list(
+    table  = df,
+    models = results
+  )
+}
+
+res_brute <- bruteforce_sarimax(
+  y_train = y_train,
+  X_train = X_train,
+  order   = c(2,1,3),
+  seasonal = c(0,0,1),  
+  lambda  = -0.1149271 ,
+  verbose = TRUE
 )
 
-summary(fit_x)
+head(res_brute$table, 5)
 
-# Significancia
-coefs <- coef(fit_x)
-ses   <- sqrt(diag(fit_x$var.coef))
+fit <- resultado_forward$model
+
+coefs <- coef(fit)
+ses   <- sqrt(diag(fit$var.coef))
 tvals <- abs(coefs / ses)
 tvals
 
-# Fijamos en 0 solo los coeficientes no significativos
-fixed_vec <- rep(NA, length(coef(fit_x)))
-names(fixed_vec) <- names(coef(fit_x))
+fixed_vec <- rep(NA, length(coef(fit)))
+names(fixed_vec) <- names(coef(fit))
 
-fixed_vec["ar4"] <- 0
 fixed_vec["valor_NO2"] <- 0
-fixed_vec["Mar"] <- 0
-fixed_vec["Mie"] <- 0
-fixed_vec["Jue"] <- 0
-fixed_vec["Vie"] <- 0
+fixed_vec["valor_NOX"] <- 0
+
+selected <- resultado_forward$selected_regressors
+xreg <- as.matrix(X_train[, selected, drop = FALSE])
 
 fit <-  Arima(
   y_train,
-  order    = c(4,1,1), 
-  xreg     = X_train,
+  order    = c(3,1,1), 
+  xreg     = xreg,
   lambda   = lambda,
   biasadj  = TRUE,
   fixed    = fixed_vec
 )
 summary(fit)
 
-## --- Diagnóstico (sobre fit, univariado) ---
-
-res <- na.omit(fit$residuals)
+## Daignóstico
+res <- fit$residuals
 hist(res)
+skewness(res)
+kurtosis(res)
+
+# Test
 shapiro.test(res)
 
 fit_t <- fitdistr(res, densfun = "t")
@@ -363,36 +460,33 @@ ks.test(res_std, "pt", df = nu)
 
 LSTS::Box.Ljung.Test(res, lag=60)
 
-acf(res,  lag.max=30)
-acf(res^2,lag.max=30)
+acf(res,  lag.max=60)
+acf(res^2,lag.max=60)
 
-
-## --- Predicción con SARIMAX (fit_x) ---
 h <- length(y_test)
+selected <- resultado_forward$selected_regressors
+xreg_forecast <- as.matrix(X_test[, selected, drop = FALSE])
 
-fc_x <- forecast(
-  fit,
-  xreg = X_test,
-  h    = h
-)
+fc <- forecast(fit, xreg = xreg_forecast, h = h)
 
-accuracy(fc_x, y_test)
+pred_full <- as.numeric(fc$mean)
+y_test_vec <- as.numeric(y_test)
 
-# Plot test vs predicción SARIMAX (base R)
+accuracy(pred_full, y_test_vec)
 
-pred <- as.numeric(fc_x$mean)
-lo80 <- as.numeric(fc_x$lower[,1])
-hi80 <- as.numeric(fc_x$upper[,1])
-lo95 <- as.numeric(fc_x$lower[,2])
-hi95 <- as.numeric(fc_x$upper[,2])
+pred <- as.numeric(fc$mean)
+lo80 <- as.numeric(fc$lower[,1])
+hi80 <- as.numeric(fc$upper[,1])
+lo95 <- as.numeric(fc$lower[,2])
+hi95 <- as.numeric(fc$upper[,2])
 
 tt <- 1:length(y_test)
 yr <- range(c(y_test, lo95, hi95), na.rm = TRUE)
 
 par(bty = "n")
-plot(tt, y_test, type = "l", lwd = 1,
-     ylim = yr, xlab = "Tiempo (índice en test)", ylab = "PM2.5",
-     main = "Validación SARIMAX")
+plot(tt, y_test, type = "l", ylim = yr, 
+     xlab = "Tiempo (índice en test)", ylab = "PM2.5",
+     main = "Validación SARIMA")
 
 polygon(
   c(tt, rev(tt)),
@@ -405,8 +499,8 @@ polygon(
   col = rgb(0, 0, 1, 0.30), border = NA
 )
 
-lines(tt, y_test, col = "black", lwd = 1)
-lines(tt, pred,  col = "red",   lwd = 1)
+lines(tt, y_test, col = "black")
+lines(tt, pred,  col = "red")
 
 legend(
   "topright",
@@ -415,3 +509,7 @@ legend(
   lwd    = c(2,10,10),
   bty    = "n"
 )
+
+plot(tail(BoxCox(y_train, -0.1149271), h))
+
+tail(datos, 1)
