@@ -9,6 +9,7 @@ library(lubridate)
 library(forecast)
 library(LSTS)
 library(MASS)
+library(purrr)
 library(car)
 library(imputeTS)
 

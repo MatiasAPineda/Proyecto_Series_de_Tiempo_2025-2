@@ -1,0 +1,42 @@
+###################################
+##      Proyecto - EYP3907       ##
+## Vicente Garay - Matías Pineda ##
+###################################
+
+library(readr)
+library(dplyr)
+library(lubridate)
+library(forecast)
+library(LSTS)
+library(MASS)
+library(purrr)
+library(car)
+library(imputeTS)
+
+## Data SINCA Estacíon Quintero 
+
+# --- PM2,5 ---
+PM25 <- read_delim(
+  "PM25.csv",
+  delim = ";",
+  trim_ws = TRUE,
+  col_types = cols(.default = "c"),
+  show_col_types = FALSE
+)
+
+PM25 <- PM25 %>%
+  mutate(
+    fecha = ymd(sprintf("20%06s", `FECHA (YYMMDD)`)),
+    val_valid = as.numeric(gsub(",", ".", `Registros validados`)),
+    val_pre   = as.numeric(gsub(",", ".", `Registros preliminares`)),
+    val_no    = as.numeric(gsub(",", ".", `Registros no validados`)),
+    valor_PM25     = coalesce(val_valid, val_pre, val_no)
+  ) %>%
+  dplyr::select(fecha, valor_PM25)
+
+summary(PM25)
+
+na_vec <- is.na(PM25$valor_PM25)
+rle_na <- rle(na_vec)
+rle_na$lengths[rle_na$values == TRUE]
+which(na_vec)
