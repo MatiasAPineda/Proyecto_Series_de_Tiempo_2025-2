@@ -15,6 +15,8 @@ serie <- ts(df$`Banco del Estado de Chile`,
                    start = c(2011, 1),
                    end = c(2025, 5),
                    frequency = 12)
+summary(serie)
+plot(serie)
 
 n       <- length(serie)
 n_train <- floor(n * 0.9)
@@ -26,12 +28,19 @@ serie_test  <- subset(serie, start = n_train + 1)
 #----------------------------------------------------------
 ndiffs(serie_train)
 
+plot(diff(serie_train))
+
 acf(serie_train, lag.max = 30)
 pacf(serie_train, lag.max = 30)
 
 modelo <- auto.arima(serie_train, 
                       seasonal = TRUE)
 summary(modelo)
+
+coefs <- coef(modelo)
+ses   <- sqrt(diag(modelo$var.coef))
+tvals <- abs(coefs / ses)
+tvals
 
 run_diagnostics <- function(fit, name, alpha = 0.05) {
   cat("\n==============================\n")
@@ -82,7 +91,7 @@ run_diagnostics <- function(fit, name, alpha = 0.05) {
 
 diag_M1 <- run_diagnostics(modelo, "mati weko")
 
-acf(modelo$residuals^2)
+acf(modelo$residuals^2, lag.max = 36)
 
 res <- residuals(modelo)
 res <- as.numeric(res)
@@ -93,3 +102,48 @@ mu    <- fit_t$estimate["m"]
 sigma <- fit_t$estimate["s"]
 res_std <- (res - mu) / sigma
 ks.test(res_std, "pt", df = nu)
+
+h <- length(serie_test)
+
+fc_x <- forecast(
+  modelo,
+  h    = h
+)
+
+accuracy(fc_x, serie_test)
+
+pred <- as.numeric(fc_x$mean)
+lo80 <- as.numeric(fc_x$lower[,1])
+hi80 <- as.numeric(fc_x$upper[,1])
+lo95 <- as.numeric(fc_x$lower[,2])
+hi95 <- as.numeric(fc_x$upper[,2])
+
+tt <- 1:length(serie_test)
+yr <- range(c(serie_test, lo95, hi95), na.rm = TRUE)
+
+par(bty = "n")
+plot(tt, serie_test, type = "l", lwd = 1,
+     ylim = yr, xlab = "Tiempo (índice en test)", ylab = "serie",
+     main = "Validación SARIMAX")
+
+polygon(
+  c(tt, rev(tt)),
+  c(hi95, rev(lo95)),
+  col = rgb(0, 0, 1, 0.15), border = NA
+)
+polygon(
+  c(tt, rev(tt)),
+  c(hi80, rev(lo80)),
+  col = rgb(0, 0, 1, 0.30), border = NA
+)
+
+lines(tt, serie_test, col = "black", lwd = 1)
+lines(tt, pred,  col = "red",   lwd = 1)
+
+legend(
+  "bottomleft",
+  legend = c("Predicción", "IC 80%", "IC 95%"),
+  col    = c("red", rgb(0,0,1,0.30), rgb(0,0,1,0.15)),
+  lwd    = c(2,10,10),
+  bty    = "n"
+)
